@@ -42,77 +42,114 @@ controller_params_t ATC_INFO;
  *  @todo  Implement this function!
  */
 void controller_server_loop(void) {
-  int listenfd = ATC_INFO.listenfd;
-  int connfd;
-  socklen_t clientlen;
-  struct sockaddr_storage clientaddr;
-  rio_t rio_client, rio_airport;
-  char buf[MAXLINE], response[MAXLINE];
-
-  while (1) {
-    clientlen = sizeof(clientaddr);
-    if ((connfd = accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
-      perror("accept");
-      continue;
-    }
-
-    rio_readinitb(&rio_client, connfd);
+    int listenfd = ATC_INFO.listenfd;
+    int connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+    rio_t rio_client, rio_airport;
+    char buf[MAXLINE], response[MAXLINE];
 
     while (1) {
-      ssize_t n = rio_readlineb(&rio_client, buf, MAXLINE);
-      if (n <= 0) {
-        break; // Client closed the connection or error occurred
-      }
+        clientlen = sizeof(clientaddr);
+        if ((connfd = accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
+            perror("accept");
+            continue;
+        }
 
-      // Parse the request
-      char request_type[MAXLINE];
-      int airport_num;
-      char rest_of_request[MAXLINE];
+        rio_readinitb(&rio_client, connfd);
 
-      if (sscanf(buf, "%s %d %[^\n]", request_type, &airport_num, rest_of_request) < 2) {
-        sprintf(response, "Error: Invalid request provided\n");
-        rio_writen(connfd, response, strlen(response));
-        continue;
-      }
+        while (1) {
+            ssize_t n = rio_readlineb(&rio_client, buf, MAXLINE);
+            if (n <= 0) {
+                break; // Client closed the connection or error occurred
+            }
 
-      // Validate airport_num
-      if (airport_num < 0 || airport_num >= ATC_INFO.num_airports) {
-        sprintf(response, "Error: Airport %d does not exist\n", airport_num);
-        rio_writen(connfd, response, strlen(response));
-        continue;
-      }
+            // Parse the request
+            char request_type[MAXLINE];
+            int airport_num;
+            char rest_of_request[MAXLINE] = {0}; // Initialize to empty string
 
-      // Get the port number of the airport node
-      int airport_port = ATC_INFO.airport_nodes[airport_num].port;
-      char port_str[PORT_STRLEN];
-      int airport_fd;
+            int num_tokens = sscanf(buf, "%s %d %[^\n]", request_type, &airport_num, rest_of_request);
 
-      snprintf(port_str, PORT_STRLEN, "%d", airport_port);
+            // Initial validation: at least command and airport_num should be present
+            if (num_tokens < 2) {
+                sprintf(response, "Error: Invalid request provided\n");
+                rio_writen(connfd, response, strlen(response));
+                continue;
+            }
 
-      if ((airport_fd = open_clientfd("localhost", port_str)) < 0) {
-        sprintf(response, "Error: Cannot connect to airport %d\n", airport_num);
-        rio_writen(connfd, response, strlen(response));
-        continue;
-      }
+            // Further validation based on request type
+            int valid_request = 1; // Flag to determine if request is valid
 
-      // Forward the request to the airport node
-      rio_writen(airport_fd, buf, n);
+            if (strcmp(request_type, "SCHEDULE") == 0) {
+                int plane_id, earliest_time, duration, fuel;
+                // Expecting 4 additional arguments
+                if (sscanf(rest_of_request, "%d %d %d %d", &plane_id, &earliest_time, &duration, &fuel) != 4) {
+                    valid_request = 0;
+                }
+            } else if (strcmp(request_type, "TIME_STATUS") == 0) {
+                int gate_num, start_idx, duration;
+                // Expecting 3 additional arguments
+                if (sscanf(rest_of_request, "%d %d %d", &gate_num, &start_idx, &duration) != 3) {
+                    valid_request = 0;
+                }
+            } else if (strcmp(request_type, "PLANE_STATUS") == 0) {
+                int plane_id;
+                // Expecting 1 additional argument
+                if (sscanf(rest_of_request, "%d", &plane_id) != 1) {
+                    valid_request = 0;
+                }
+            } else {
+                // Unknown command
+                valid_request = 0;
+            }
 
-      // Initialize Rio for airport_fd
-      rio_readinitb(&rio_airport, airport_fd);
+            if (!valid_request) {
+                sprintf(response, "Error: Invalid request provided\n");
+                rio_writen(connfd, response, strlen(response));
+                continue;
+            }
 
-      // Read response from airport node and send to client
-      ssize_t m;
-      while ((m = rio_readlineb(&rio_airport, response, MAXLINE)) > 0) {
-        rio_writen(connfd, response, m);
-      }
+            // Validate airport_num
+            if (airport_num < 0 || airport_num >= ATC_INFO.num_airports) {
+                sprintf(response, "Error: Airport %d does not exist\n", airport_num);
+                rio_writen(connfd, response, strlen(response));
+                continue;
+            }
 
-      close(airport_fd);
+            // Get the port number of the airport node
+            int airport_port = ATC_INFO.airport_nodes[airport_num].port;
+            char port_str[PORT_STRLEN];
+            int airport_fd;
+
+            snprintf(port_str, PORT_STRLEN, "%d", airport_port);
+
+            if ((airport_fd = open_clientfd("localhost", port_str)) < 0) {
+                sprintf(response, "Error: Cannot connect to airport %d\n", airport_num);
+                rio_writen(connfd, response, strlen(response));
+                continue;
+            }
+
+            // Forward the request to the airport node
+            rio_writen(airport_fd, buf, n);
+
+            // Initialize Rio for airport_fd
+            rio_readinitb(&rio_airport, airport_fd);
+
+            // Read response from airport node and send to client
+            ssize_t m;
+            while ((m = rio_readlineb(&rio_airport, response, MAXLINE)) > 0) {
+                rio_writen(connfd, response, m);
+            }
+
+            close(airport_fd);
+        }
+
+        close(connfd);
     }
-
-    close(connfd);
-  }
 }
+
+
 
 /** @brief A handler for reaping child processes (individual airport nodes).
  *         It may be helpful to set a breakpoint here when trying to debug
