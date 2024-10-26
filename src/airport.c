@@ -216,18 +216,6 @@ void airport_node_loop(int listenfd) {
         close(connfd);
         continue;
       }
-      if (fuel < 0) {
-        sprintf(response, "Error: Invalid 'fuel' value (%d)\n", fuel);
-        rio_writen(connfd, response, strlen(response));
-        close(connfd);
-        continue;
-      }
-      if (earliest_time + fuel >= NUM_TIME_SLOTS) {
-        sprintf(response, "Error: Invalid 'fuel' value (%d)\n", fuel);
-        rio_writen(connfd, response, strlen(response));
-        close(connfd);
-        continue;
-      }
 
       // Schedule the plane
       time_info_t result = schedule_plane(plane_id, earliest_time, duration, fuel);
