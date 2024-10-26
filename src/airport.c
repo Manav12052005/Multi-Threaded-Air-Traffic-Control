@@ -18,7 +18,7 @@ static int AIRPORT_ID = -1;
 static airport_t *AIRPORT_DATA = NULL;
 
 gate_t *get_gate_by_idx(int gate_idx) {
-  if ((gate_idx) < 0 || (gate_idx > AIRPORT_DATA->num_gates))
+  if ((gate_idx) < 0 || (gate_idx >= AIRPORT_DATA->num_gates))
     return NULL;
   else
     return &AIRPORT_DATA->gates[gate_idx];
@@ -144,8 +144,216 @@ void initialise_node(int airport_id, int num_gates, int listenfd) {
 }
 
 void airport_node_loop(int listenfd) {
-  /** TODO: implement the main server loop for an individual airport node here. */
+  int connfd;
+  socklen_t clientlen;
+  struct sockaddr_storage clientaddr;
+  rio_t rio;
+  char buf[MAXLINE], response[MAXLINE];
+
   while (1) {
-    /* ... */
+    clientlen = sizeof(clientaddr);
+    connfd = accept(listenfd, (SA *)&clientaddr, &clientlen);
+    if (connfd < 0) {
+      perror("accept");
+      continue;
+    }
+
+    rio_readinitb(&rio, connfd);
+
+    // Read one request
+    ssize_t n = rio_readlineb(&rio, buf, MAXLINE);
+    if (n <= 0) {
+      close(connfd);
+      continue; // Client closed the connection or error occurred
+    }
+
+    // Parse the request
+    char request_type[MAXLINE];
+    int airport_num;
+    char rest_of_request[MAXLINE];
+
+    int num_parsed = sscanf(buf, "%s %d %[^\n]", request_type, &airport_num, rest_of_request);
+    if (num_parsed < 2) {
+      sprintf(response, "Error: Invalid request provided\n");
+      rio_writen(connfd, response, strlen(response));
+      close(connfd);
+      continue;
+    }
+
+    // Validate airport_num
+    if (airport_num != AIRPORT_ID) {
+      sprintf(response, "Error: Airport %d does not exist\n", airport_num);
+      rio_writen(connfd, response, strlen(response));
+      close(connfd);
+      continue;
+    }
+
+    if (strcmp(request_type, "SCHEDULE") == 0) {
+      int plane_id, earliest_time, duration, fuel;
+      if (sscanf(rest_of_request, "%d %d %d %d", &plane_id, &earliest_time, &duration, &fuel) != 4) {
+        sprintf(response, "Error: Invalid request provided\n");
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+
+      // Input validation
+      if (earliest_time < 0 || earliest_time >= NUM_TIME_SLOTS) {
+        sprintf(response, "Error: Invalid 'earliest' time (%d)\n", earliest_time);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+      if (duration < 0) {
+        sprintf(response, "Error: Invalid 'duration' value (%d)\n", duration);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+      if (earliest_time + duration >= NUM_TIME_SLOTS) {
+        sprintf(response, "Error: Invalid 'duration' value (%d)\n", duration);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+      if (fuel < 0) {
+        sprintf(response, "Error: Invalid 'fuel' value (%d)\n", fuel);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+      if (earliest_time + fuel >= NUM_TIME_SLOTS) {
+        sprintf(response, "Error: Invalid 'fuel' value (%d)\n", fuel);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+
+      // Schedule the plane
+      time_info_t result = schedule_plane(plane_id, earliest_time, duration, fuel);
+
+      if (result.gate_number >= 0) {
+        int start_time = result.start_time;
+        int end_time = result.end_time;
+        int gate_num = result.gate_number;
+
+        // Cast IDX_TO_HOUR and IDX_TO_MINS to int
+        int start_hour = IDX_TO_HOUR(start_time);
+        int start_mins = (int)IDX_TO_MINS(start_time);
+        int end_hour = IDX_TO_HOUR(end_time);
+        int end_mins = (int)IDX_TO_MINS(end_time);
+
+        sprintf(response, "SCHEDULED %d at GATE %d: %02d:%02d-%02d:%02d\n",
+                plane_id, gate_num,
+                start_hour, start_mins,
+                end_hour, end_mins);
+      } else {
+        sprintf(response, "Error: Cannot schedule %d\n", plane_id);
+      }
+      rio_writen(connfd, response, strlen(response));
+
+    } else if (strcmp(request_type, "PLANE_STATUS") == 0) {
+      int plane_id;
+      if (sscanf(rest_of_request, "%d", &plane_id) != 1) {
+        sprintf(response, "Error: Invalid request provided\n");
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+
+      time_info_t result = lookup_plane_in_airport(plane_id);
+
+      if (result.gate_number >= 0) {
+        int start_time = result.start_time;
+        int end_time = result.end_time;
+        int gate_num = result.gate_number;
+
+        // Cast IDX_TO_HOUR and IDX_TO_MINS to int
+        int start_hour = IDX_TO_HOUR(start_time);
+        int start_mins = (int)IDX_TO_MINS(start_time);
+        int end_hour = IDX_TO_HOUR(end_time);
+        int end_mins = (int)IDX_TO_MINS(end_time);
+
+        sprintf(response, "PLANE %d scheduled at GATE %d: %02d:%02d-%02d:%02d\n",
+                plane_id, gate_num,
+                start_hour, start_mins,
+                end_hour, end_mins);
+      } else {
+        sprintf(response, "PLANE %d not scheduled at airport %d\n", plane_id, AIRPORT_ID);
+      }
+      rio_writen(connfd, response, strlen(response));
+
+    } else if (strcmp(request_type, "TIME_STATUS") == 0) {
+      int gate_num, start_idx, duration;
+      if (sscanf(rest_of_request, "%d %d %d", &gate_num, &start_idx, &duration) != 3) {
+        sprintf(response, "Error: Invalid request provided\n");
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+
+      // Validate gate_num
+      if (gate_num < 0 || gate_num >= AIRPORT_DATA->num_gates) {
+        sprintf(response, "Error: Invalid 'gate' value (%d)\n", gate_num);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+
+      // Validate start_idx and duration
+      if (start_idx < 0 || start_idx >= NUM_TIME_SLOTS) {
+        sprintf(response, "Error: Invalid 'start' time (%d)\n", start_idx);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+      if (duration < 0) {
+        sprintf(response, "Error: Invalid 'duration' value (%d)\n", duration);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+      if (start_idx + duration >= NUM_TIME_SLOTS) {
+        sprintf(response, "Error: Invalid 'duration' value (%d)\n", duration);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+
+      gate_t *gate = get_gate_by_idx(gate_num);
+      if (gate == NULL) {
+        sprintf(response, "Error: Invalid 'gate' value (%d)\n", gate_num);
+        rio_writen(connfd, response, strlen(response));
+        close(connfd);
+        continue;
+      }
+
+      int end_idx = start_idx + duration;
+      for (int idx = start_idx; idx <= end_idx; idx++) {
+        time_slot_t *ts = get_time_slot_by_idx(gate, idx);
+        if (ts == NULL) {
+          continue; // Skip invalid time slots
+        }
+        char status = ts->status == 1 ? 'A' : 'F';
+        int flight_id = ts->status == 1 ? ts->plane_id : 0;
+
+        // Cast IDX_TO_HOUR and IDX_TO_MINS to int
+        int current_hour = IDX_TO_HOUR(idx);
+        int current_mins = (int)IDX_TO_MINS(idx);
+
+        sprintf(response, "AIRPORT %d GATE %d %02d:%02d: %c - %d\n",
+                AIRPORT_ID, gate_num,
+                current_hour, current_mins,
+                status, flight_id);
+        rio_writen(connfd, response, strlen(response));
+      }
+
+    } else {
+      sprintf(response, "Error: Invalid request provided\n");
+      rio_writen(connfd, response, strlen(response));
+    }
+
+    // Close the connection after processing the request
+    close(connfd);
   }
 }

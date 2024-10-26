@@ -1,3 +1,7 @@
+/*
+ * controller.c - Air Traffic Control Controller Node
+ */
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -6,8 +10,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
 #include "airport.h"
+#include "network_utils.h" // Include necessary network utilities
 
 #define PORT_STRLEN 6
 #define DEFAULT_PORTNUM 1024
@@ -39,9 +43,74 @@ controller_params_t ATC_INFO;
  */
 void controller_server_loop(void) {
   int listenfd = ATC_INFO.listenfd;
-  /** TODO: implement this function! */
+  int connfd;
+  socklen_t clientlen;
+  struct sockaddr_storage clientaddr;
+  rio_t rio_client, rio_airport;
+  char buf[MAXLINE], response[MAXLINE];
+
   while (1) {
-    /* ... */
+    clientlen = sizeof(clientaddr);
+    if ((connfd = accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
+      perror("accept");
+      continue;
+    }
+
+    rio_readinitb(&rio_client, connfd);
+
+    while (1) {
+      ssize_t n = rio_readlineb(&rio_client, buf, MAXLINE);
+      if (n <= 0) {
+        break; // Client closed the connection or error occurred
+      }
+
+      // Parse the request
+      char request_type[MAXLINE];
+      int airport_num;
+      char rest_of_request[MAXLINE];
+
+      if (sscanf(buf, "%s %d %[^\n]", request_type, &airport_num, rest_of_request) < 2) {
+        sprintf(response, "Error: Invalid request provided\n");
+        rio_writen(connfd, response, strlen(response));
+        continue;
+      }
+
+      // Validate airport_num
+      if (airport_num < 0 || airport_num >= ATC_INFO.num_airports) {
+        sprintf(response, "Error: Airport %d does not exist\n", airport_num);
+        rio_writen(connfd, response, strlen(response));
+        continue;
+      }
+
+      // Get the port number of the airport node
+      int airport_port = ATC_INFO.airport_nodes[airport_num].port;
+      char port_str[PORT_STRLEN];
+      int airport_fd;
+
+      snprintf(port_str, PORT_STRLEN, "%d", airport_port);
+
+      if ((airport_fd = open_clientfd("localhost", port_str)) < 0) {
+        sprintf(response, "Error: Cannot connect to airport %d\n", airport_num);
+        rio_writen(connfd, response, strlen(response));
+        continue;
+      }
+
+      // Forward the request to the airport node
+      rio_writen(airport_fd, buf, n);
+
+      // Initialize Rio for airport_fd
+      rio_readinitb(&rio_airport, airport_fd);
+
+      // Read response from airport node and send to client
+      ssize_t m;
+      while ((m = rio_readlineb(&rio_airport, response, MAXLINE)) > 0) {
+        rio_writen(connfd, response, m);
+      }
+
+      close(airport_fd);
+    }
+
+    close(connfd);
   }
 }
 
