@@ -45,10 +45,9 @@ struct time_slot_t {
 
 typedef struct time_slot_t time_slot_t;
 
-/** This `gate_t` structure is currently just a wrapper for an array of time
- *  slots. We define it like this to make it easy to include any necessary extra
- *  information when implementing multithreading. */
+/** This `gate_t` structure now includes a mutex for fine-grained locking. */
 struct gate_t {
+  pthread_mutex_t gate_lock;          // Mutex for this specific gate
   time_slot_t time_slots[NUM_TIME_SLOTS];
 };
 
@@ -59,8 +58,8 @@ typedef struct gate_t gate_t;
  *         the variable number of gates.
  */
 struct airport_t {
-  int num_gates;  // Number of gates in this airport
-  gate_t gates[]; // Array of each gate.
+  int num_gates;          // Number of gates in this airport
+  gate_t gates[];         // Array of each gate.
 };
 
 /** This structure is used to represent a (gate index, start time, end time)
@@ -74,7 +73,7 @@ struct time_info_t {
   int end_time;
 };
 
-/** Helper functions and macros defined for you to use. */
+/** Helper functions and macros defined for you to use. **/
 
 /** @brief Allocates sufficient memory for an airport struct containing all
  *         information needed in an individual airport node.
@@ -96,7 +95,7 @@ airport_t *create_airport(int num_gates);
  *  @param listenfd   The listening socket this airport will use to accept
  *                    connections from the controller.
  *
- *  @note If any step of the initialisation fails, the suprocess of the airport
+ *  @note If any step of the initialisation fails, the subprocess of the airport
  *        node will exit with return code 1.
  */
 void initialise_node(int airport_id, int num_gates, int listenfd);
@@ -157,7 +156,7 @@ int search_gate(gate_t *gate, int plane_id);
  * */
 time_info_t lookup_plane_in_airport(int plane_id);
 
-/** @brief   Attempt to assign the given flight in this `gate`, based on it's
+/** @brief   Attempt to assign the given flight in this `gate`, based on its
  *           required parameters (earliest landing time, duration of time to
  *           remain in the gate, remaining fuel).
  *
@@ -186,16 +185,7 @@ time_info_t lookup_plane_in_airport(int plane_id);
  */
 int assign_in_gate(gate_t *gate, int plane_id, int start, int duration, int fuel);
 
-/** @brief  A function to attempt to schedule a flight in this airport, based on
- *          the required parameters.
- *
- *          This function will call `assign_in_gate` for each gate in the airport,
- *          and set the values of the returned `time_info_t` structure to the
- *          gate number and assigned starting time if successful.
- */
-time_info_t schedule_plane(int plane_id, int start, int duration, int fuel);
-
-/** @brief The main server loop for an individual airport node.
+/** @brief  The main server loop for an individual airport node.
  *
  *  @todo  Implement this function!
  *

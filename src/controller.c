@@ -37,24 +37,66 @@ typedef struct controller_params_t {
 
 controller_params_t ATC_INFO;
 
-/** @brief The main server loop of the controller.
- *
- *  @todo  Implement this function!
- */
-void controller_server_loop(void) {
-    int listenfd = ATC_INFO.listenfd;
-    int connfd;
-    socklen_t clientlen;
-    struct sockaddr_storage clientaddr;
-    rio_t rio_client, rio_airport;
-    char buf[MAXLINE], response[MAXLINE];
+/* Thread pool definitions */
+#define THREAD_POOL_SIZE 4
+#define QUEUE_SIZE 100
 
+typedef struct request_queue_t {
+    int connections[QUEUE_SIZE];
+    int front;
+    int rear;
+    int count;
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
+} request_queue_t;
+
+static request_queue_t request_queue;
+
+/* Initialize the request queue */
+void init_request_queue(request_queue_t *q) {
+    q->front = 0;
+    q->rear = 0;
+    q->count = 0;
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->not_empty, NULL);
+    pthread_cond_init(&q->not_full, NULL);
+}
+
+/* Enqueue a connection */
+void enqueue_request(request_queue_t *q, int connfd) {
+    pthread_mutex_lock(&q->mutex);
+    while (q->count == QUEUE_SIZE) {
+        pthread_cond_wait(&q->not_full, &q->mutex);
+    }
+    q->connections[q->rear] = connfd;
+    q->rear = (q->rear + 1) % QUEUE_SIZE;
+    q->count++;
+    pthread_cond_signal(&q->not_empty);
+    pthread_mutex_unlock(&q->mutex);
+}
+
+/* Dequeue a connection */
+int dequeue_request(request_queue_t *q) {
+    pthread_mutex_lock(&q->mutex);
+    while (q->count == 0) {
+        pthread_cond_wait(&q->not_empty, &q->mutex);
+    }
+    int connfd = q->connections[q->front];
+    q->front = (q->front + 1) % QUEUE_SIZE;
+    q->count--;
+    pthread_cond_signal(&q->not_full);
+    pthread_mutex_unlock(&q->mutex);
+    return connfd;
+}
+
+/* Worker thread function */
+void *controller_worker(void *arg) {
     while (1) {
-        clientlen = sizeof(clientaddr);
-        if ((connfd = accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
-            perror("accept");
-            continue;
-        }
+        int connfd = dequeue_request(&request_queue);
+        // Handle the connection
+        rio_t rio_client, rio_airport;
+        char buf[MAXLINE], response[MAXLINE];
 
         rio_readinitb(&rio_client, connfd);
 
@@ -69,10 +111,10 @@ void controller_server_loop(void) {
             int airport_num;
             char rest_of_request[MAXLINE] = {0}; // Initialize to empty string
 
-            int num_tokens = sscanf(buf, "%s %d %[^\n]", request_type, &airport_num, rest_of_request);
+            int num_parsed = sscanf(buf, "%s %d %[^\n]", request_type, &airport_num, rest_of_request);
 
             // Initial validation: at least command and airport_num should be present
-            if (num_tokens < 2) {
+            if (num_parsed < 2) {
                 sprintf(response, "Error: Invalid request provided\n");
                 rio_writen(connfd, response, strlen(response));
                 continue;
@@ -80,6 +122,7 @@ void controller_server_loop(void) {
 
             // Further validation based on request type
             int valid_request = 1; // Flag to determine if request is valid
+            int expected_response_lines = 1; // Default
 
             if (strcmp(request_type, "SCHEDULE") == 0) {
                 int plane_id, earliest_time, duration, fuel;
@@ -92,6 +135,8 @@ void controller_server_loop(void) {
                 // Expecting 3 additional arguments
                 if (sscanf(rest_of_request, "%d %d %d", &gate_num, &start_idx, &duration) != 3) {
                     valid_request = 0;
+                } else {
+                    expected_response_lines = duration + 1; // Inclusive
                 }
             } else if (strcmp(request_type, "PLANE_STATUS") == 0) {
                 int plane_id;
@@ -136,10 +181,38 @@ void controller_server_loop(void) {
             // Initialize Rio for airport_fd
             rio_readinitb(&rio_airport, airport_fd);
 
-            // Read response from airport node and send to client
-            ssize_t m;
-            while ((m = rio_readlineb(&rio_airport, response, MAXLINE)) > 0) {
+            // Read the first response line from the airport node
+            ssize_t m = rio_readlineb(&rio_airport, response, MAXLINE);
+            if (m <= 0) {
+                // If no response, send error
+                sprintf(response, "Error: No response from airport %d\n", airport_num);
+                rio_writen(connfd, response, strlen(response));
+                close(airport_fd);
+                continue;
+            }
+
+            // Check if the response is an error message
+            if (strncmp(response, "Error:", 6) == 0) {
+                // Send the error message to the client
                 rio_writen(connfd, response, m);
+                close(airport_fd);
+                continue;
+            }
+
+            // If not an error, send the first line and proceed to read the remaining lines
+            rio_writen(connfd, response, m);
+
+            // Calculate remaining lines to read
+            int remaining_lines = expected_response_lines - 1;
+            for (int i = 0; i < remaining_lines; i++) {
+                ssize_t m_next = rio_readlineb(&rio_airport, response, MAXLINE);
+                if (m_next <= 0) {
+                    // If not enough response lines, send error and stop
+                    sprintf(response, "Error: Incomplete response from airport %d\n", airport_num);
+                    rio_writen(connfd, response, strlen(response));
+                    break;
+                }
+                rio_writen(connfd, response, m_next);
             }
 
             close(airport_fd);
@@ -147,9 +220,44 @@ void controller_server_loop(void) {
 
         close(connfd);
     }
+    return NULL;
 }
 
 
+/** @brief The main server loop of the controller.
+ *
+ *  @todo  Implement this function!
+ */
+void controller_server_loop(void) {
+    int listenfd = ATC_INFO.listenfd;
+    int connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+
+    // Initialize the request queue
+    init_request_queue(&request_queue);
+
+    // Create worker threads
+    pthread_t threads[THREAD_POOL_SIZE];
+    for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+        if (pthread_create(&threads[i], NULL, controller_worker, NULL) != 0) {
+            perror("pthread_create");
+            exit(1);
+        }
+        pthread_detach(threads[i]); // Detached mode
+    }
+
+    while (1) {
+        clientlen = sizeof(clientaddr);
+        if ((connfd = accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
+            perror("accept");
+            continue;
+        }
+
+        // Enqueue the connection for worker threads to handle
+        enqueue_request(&request_queue, connfd);
+    }
+}
 
 /** @brief A handler for reaping child processes (individual airport nodes).
  *         It may be helpful to set a breakpoint here when trying to debug
@@ -167,7 +275,7 @@ void sigchld_handler(int sig) {
  */
 
 /** @brief This function spawns child processes for each airport node, and
- *         opens a listening socket for the controller to u.
+ *         opens a listening socket for the controller to use.
  */
 void initialise_network(void) {
   char port_str[PORT_STRLEN];
@@ -315,6 +423,5 @@ int main(int argc, char *argv[]) {
   if (parse_args(argc, argv) < 0)
     return 1;
   initialise_network();
-  controller_server_loop();
   return 0;
 }
