@@ -47,7 +47,7 @@ typedef struct time_slot_t time_slot_t;
 
 /** This `gate_t` structure now includes a mutex for fine-grained locking. */
 struct gate_t {
-  pthread_mutex_t gate_lock;          // Mutex for this specific gate
+  pthread_mutex_t gate_lock;         
   time_slot_t time_slots[NUM_TIME_SLOTS];
 };
 
