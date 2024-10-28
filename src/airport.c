@@ -18,7 +18,7 @@ static int AIRPORT_ID = -1;
 static airport_t *AIRPORT_DATA = NULL;
 
 /* thread pool def'ns */
-#define THREAD_POOL_SIZE 1
+#define THREAD_POOL_SIZE 4
 #define QUEUE_SIZE 100
 
 // Data structure for connec'n queue and initialisation

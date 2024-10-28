@@ -38,7 +38,7 @@ typedef struct controller_params_t {
 controller_params_t ATC_INFO;
 
 /* thread pool def'ns */
-#define THREAD_POOL_SIZE 1
+#define THREAD_POOL_SIZE 4
 #define QUEUE_SIZE 100
 
 typedef struct request_queue_t {

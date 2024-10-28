@@ -99,9 +99,67 @@ Dequeuing and Processing: When worker thread, who are continously attempting to 
 
 Efficiency: The queue is FIFO and hence maintains fairness. This implementation also tries to balance the workload between the worker threads for more efficiency.
 
-### Impact on performance
+#### Impact on performance
 Increased Throughput: 
 
+Due to more client requests being proccessed parallel to each other, it allows for more instructions to be processed per unit time. For a real-world airport situation, this is very ideal.
+
+Reduced Latency: 
+
+The concurrent handling of client requests equaled to faster responses being delivered back and overall is a plus point for less communication delay.
+
+Resource Management:
+
+Having a fixed thread pool instead of creating a new thread every single time limits the expensiture of processing power and limits potenial for system crashes and bottlenecks.
+
+### Multithreading within Airport Nodes
+Overview
+- Multithreading for each node
+- Fixed thread pool size
+- Per-Gate mutexes
+- Detached Threads
+
+Number of threads chosen: 4
+
+Justification : Same as Controller Node.
+
+#### Distribution of Client Connections
+This is done using the shared connection queue.
+
+Enqueuing Connections: The main server after accepting a connections, puts the connfd information into the shared request queue. if the queue is full the main thread blocks it till space becomes available
+
+Dequeuing and Processing: Same as controller node. This uses a rio_t structure for buffered reading. 
+
+Efficiency: Same as controller node.
+
+### Protection of Schedule Accesses
+The schedule of each gate was guarded with a per-gate mutex. This is a implementation of fine-grained locking scheme which instead of locking the whole schedule, it only locks the specif gate we are concerned about.
+
+#### Locking strategy
+Lock Granularity: Each gate_t structure contains its own mutex (gate_lock).
+
+- When a worker thread wants to make a change, it first acquires the associated mutex with the concerned gate. 
+- This approach allows multiple threads to operate on several different gates parallelly.
+- This is prevents serialisation of schedule processes which would happen if we used a global mutex lock.
+
+Lock acquisition: When accessing a certain gate to either schedule a plane landing or querying information, the thread first locks the mutex lock for the gate.
+This is added in the provided helper function [schedule_plane](https://gitlab.cecs.anu.edu.au/u7782612/comp2310-2024-assignment-2/-/blob/main/src/airport.c?ref_type=heads#L73-91)
+
+Avoiding Deadlocks: The threads are only allowed to hold at most one gate-lock (mutex) at any specific moment. This and the locks being placed through a simple loop sequentially takes the chances of circular wait conditions out of the error scope.
+
+#### Impact on performance
+Increased Throughput: 
+
+The increased number of recieved requests per unit time increases number of cammands processed and overall more clients are able to be added to the system, so this is a plus for scalability.  
+
+Reduced Latency: 
+
+The concurrent handling of client requests equaled to faster responses being delivered back and overall is a plus point for less communication delay.
+
+Resource Management:
+
+Having a fixed thread pool instead of creating a new thread every single time limits the expensiture of processing power and limits potenial for system crashes and bottlenecks.
 
 ## Testing
 
+The biggest challenge I faced during the implementation of this program is the designing of the TIME_STATUS command. This command takes a lot of invalidation conditions and returns a dynamic multi-line response. The command demanded thorugh debugging doe to multiple read and write statements entering infinite loops. Specifically the following command in test 3 TIME_STATUS 0 0 0 900 caused my program to only return this error and then timed out while writing out the other request responses. This was fixed by ensuring the duration invalidation did not end up in a infinite loop. Once this was done the issue still persisted. The fix for this further problem required setting a fixed expected response_lines variable which told the controller node how many lines to expect when processing a TIME_STATUS command.
